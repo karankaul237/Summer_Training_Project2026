@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Data (too large / sector-sensitive for version control)
+data/raw/*
+data/harmonized/*
+data/partitioned/*
+!data/raw/.gitkeep
+!data/harmonized/.gitkeep
+!data/partitioned/.gitkeep
+
+# Results / experiment outputs
+results/*.csv
+results/*.json
+results/*.png
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
