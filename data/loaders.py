@@ -75,6 +75,7 @@ def _finalize(dataset: str, raw_features: pd.DataFrame, raw_labels: pd.Series) -
     label_name = label_name.loc[keep].reset_index(drop=True)
 
     available = schema.GROUPS_AVAILABLE[dataset]
+    display_name = schema.CLIENT_DISPLAY_NAME.get(dataset, dataset)
     out = pd.DataFrame(index=raw_features.index)
     for group, cols in schema.FEATURE_GROUPS.items():
         if group in available:
@@ -97,7 +98,7 @@ def _finalize(dataset: str, raw_features: pd.DataFrame, raw_labels: pd.Series) -
     out = out[schema.MODEL_INPUT_COLUMNS].copy()
     out["label_name"] = label_name.values
     out["label_id"] = out["label_name"].map(schema.CLASS_TO_ID)
-    out["client"] = dataset
+    out["client"] = display_name
     return out
 
 
@@ -145,8 +146,10 @@ def load_cic(raw_dir: str = "data/raw") -> pd.DataFrame:
         feats["fin_count"] = df[src["fin_count"][0]]
         feats["ack_count"] = df[src["ack_count"][0]]
 
-        frames.append(_finalize("cic", feats, df[src["label"]]))
-        print(f"[cic] {Path(fp).name}: {len(df):,} rows loaded")
+        out = _finalize("cic", feats, df[src["label"]])
+        out["client"] = schema.CIC_FILE_TO_CLIENT[Path(fp).name]
+        frames.append(out)
+        print(f"[cic -> {out['client'].iloc[0]}] {Path(fp).name}: {len(df):,} rows loaded")
 
     return pd.concat(frames, ignore_index=True)
 

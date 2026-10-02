@@ -22,6 +22,31 @@ RAW_GLOBS = {
     "csic": "e-commerce/Web-Application-Attack-Datasets-master/CSVData/csic_final.csv",
 }
 
+# CIC-IDS2017 is split across 8 files, each dominated by a specific attack
+# scenario by design. We assign files to Bank vs University based on which
+# scenario is realistic for that sector, rather than randomly slicing rows --
+# this is genuine, file-grounded heterogeneity, not synthetic partitioning.
+CIC_FILE_TO_CLIENT = {
+    "Tuesday-WorkingHours.pcap_ISCX.csv": "bank",                        # brute force / credential attacks
+    "Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv": "bank",    # web attacks
+    "Monday-WorkingHours.pcap_ISCX.csv": "university",                  # benign baseline
+    "Wednesday-workingHours.pcap_ISCX.csv": "university",                # DoS
+    "Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX.csv": "university",
+    "Friday-WorkingHours-Morning.pcap_ISCX.csv": "university",          # benign + botnet
+    "Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv": "university",
+    "Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv": "university",
+}
+
+# The other 3 loaders each map to exactly one real-world client.
+CLIENT_DISPLAY_NAME = {
+    "wustl": "hospital",
+    "edge": "manufacturing",
+    "csic": "ecommerce",
+}
+
+# The 5 real FL clients, final names used everywhere from here on.
+ALL_CLIENTS = ["bank", "university", "hospital", "manufacturing", "ecommerce"]
+
 # ---------------------------------------------------------------------------
 # 2. Unified label taxonomy
 # ---------------------------------------------------------------------------
