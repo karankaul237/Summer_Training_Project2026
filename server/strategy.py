@@ -89,4 +89,9 @@ def build_fedavg_strategy(history: list[dict],
         evaluate_metrics_aggregation_fn=eval_agg,
         initial_parameters=initial_parameters,
         save_path=save_path,
+        # Both sides of a SecAgg mask pair need to independently derive the
+        # same seed (see privacy/secure_aggregation.py) -- the round number
+        # is the shared ingredient that makes this possible without any
+        # direct client-to-client communication.
+        on_fit_config_fn=lambda server_round: {"server_round": server_round},
     )

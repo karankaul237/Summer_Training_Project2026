@@ -58,7 +58,8 @@ CLIENT_CONFIG = {
 
 class FedShieldClient(fl.client.NumPyClient):
     def __init__(self, client_name: str, local_epochs: int = None, batch_size: int = 256,
-                 lr: float = 1e-3, weight_decay: float = 1e-4, mu: float = None):
+                 lr: float = 1e-3, weight_decay: float = 1e-4, mu: float = None,
+                 use_secagg: bool = False, malicious: bool = False, attack_scale: float = 20.0):
         cfg = CLIENT_CONFIG.get(client_name, {"local_epochs": 1, "mu": 0.01})
         self.client_name = client_name
         self.local_epochs = local_epochs if local_epochs is not None else cfg["local_epochs"]
@@ -66,6 +67,9 @@ class FedShieldClient(fl.client.NumPyClient):
         self.batch_size = batch_size
         self.lr = lr
         self.weight_decay = weight_decay  # L2 regularization: part of our overfitting defense
+        self.use_secagg = use_secagg      # Step 6: mask updates before returning them
+        self.malicious = malicious        # Step 7: simulate a compromised/attacking client
+        self.attack_scale = attack_scale
 
         self.model = IDSModel().to(DEVICE)
         self.train_ds = load_client_split(client_name, "train")
@@ -109,7 +113,25 @@ class FedShieldClient(fl.client.NumPyClient):
         # the strongest fairness correction we apply while keeping one
         # shared global model (required for SecAgg/DP/MIA in later steps).
         fedavg_weight = 1000
-        return get_parameters(self.model), fedavg_weight, {
+        final_params = get_parameters(self.model)
+
+        if self.malicious:
+            # Model-replacement / sign-flipping attack: invert and amplify
+            # the honestly-learned direction, rather than just adding noise.
+            # A noise attack is easy for Krum to catch almost by accident;
+            # this is a harder, more deliberate attack -- actively pushing
+            # the global model AWAY from what honest clients are learning,
+            # which is the realistic worst case Krum needs to defend against.
+            delta = [fp - gp for fp, gp in zip(final_params, global_params)]
+            final_params = [gp - self.attack_scale * d
+                             for gp, d in zip(global_params, delta)]
+
+        if self.use_secagg:
+            from privacy.secure_aggregation import mask_parameters
+            server_round = config.get("server_round", 1)
+            final_params = mask_parameters(self.client_name, final_params, server_round)
+
+        return final_params, fedavg_weight, {
             "client": self.client_name, "true_n_examples": len(self.train_ds),
         }
 
