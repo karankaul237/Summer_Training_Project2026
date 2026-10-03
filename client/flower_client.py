@@ -80,11 +80,14 @@ class FedShieldClient(fl.client.NumPyClient):
         return get_parameters(self.model)
 
     def fit(self, parameters, config):
+        # NumPy snapshot of the global weights, for the Step 7 attack math
+        # below (final_params is also NumPy, via get_parameters()).
+        global_params_np = [p.copy() for p in parameters]
+
         set_parameters(self.model, parameters)
-        # Snapshot the global model's weights BEFORE local training starts --
-        # FedProx penalizes drifting away from this point, which keeps a
-        # client's local update (especially Hospital's 10 epochs) from
-        # swinging so far that it destabilizes the shared global model.
+        # Separate PyTorch-tensor snapshot -- FedProx's loss term needs to
+        # do arithmetic with the LIVE, autograd-tracked model parameters,
+        # which only works against torch tensors, not NumPy arrays.
         global_params = [p.clone().detach() for p in self.model.parameters()]
         self.model.train()
 
@@ -122,9 +125,13 @@ class FedShieldClient(fl.client.NumPyClient):
             # this is a harder, more deliberate attack -- actively pushing
             # the global model AWAY from what honest clients are learning,
             # which is the realistic worst case Krum needs to defend against.
-            delta = [fp - gp for fp, gp in zip(final_params, global_params)]
+            # global_params (captured for FedProx, above) is a list of
+            # torch Tensors; final_params is already numpy (from
+            # get_parameters) -- convert before mixing the two.
+            global_params_np = [gp.detach().cpu().numpy() for gp in global_params]
+            delta = [fp - gp for fp, gp in zip(final_params, global_params_np)]
             final_params = [gp - self.attack_scale * d
-                             for gp, d in zip(global_params, delta)]
+                             for gp, d in zip(global_params_np, delta)]
 
         if self.use_secagg:
             from privacy.secure_aggregation import mask_parameters
