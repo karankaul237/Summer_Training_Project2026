@@ -59,8 +59,22 @@ CLIENT_CONFIG = {
 class FedShieldClient(fl.client.NumPyClient):
     def __init__(self, client_name: str, local_epochs: int = None, batch_size: int = 256,
                  lr: float = 1e-3, weight_decay: float = 1e-4, mu: float = None,
-                 use_secagg: bool = False, malicious: bool = False, attack_scale: float = 20.0):
-        cfg = CLIENT_CONFIG.get(client_name, {"local_epochs": 1, "mu": 0.01})
+                 use_secagg: bool = False, malicious: bool = False, attack_scale: float = 20.0,
+                 use_dp: bool = False, noise_multiplier: float = 1.0, max_grad_norm: float = 1.0):
+        self.use_dp = use_dp
+        self.noise_multiplier = noise_multiplier
+        self.max_grad_norm = max_grad_norm
+        self.total_dp_steps = 0  # informational only; authoritative count computed post-hoc
+
+        if use_dp:
+            # Uniform settings across all clients, FedProx off -- isolates
+            # the DP noise as the only variable under study for this
+            # experiment. Mixing in Step 5/7's adaptive epochs and FedProx
+            # would make it impossible to attribute an accuracy change to
+            # noise specifically versus one of those other mechanisms.
+            cfg = {"local_epochs": 2, "mu": 0.0}
+        else:
+            cfg = CLIENT_CONFIG.get(client_name, {"local_epochs": 1, "mu": 0.01})
         self.client_name = client_name
         self.local_epochs = local_epochs if local_epochs is not None else cfg["local_epochs"]
         self.mu = mu if mu is not None else cfg["mu"]  # FedProx proximal term strength
@@ -96,17 +110,43 @@ class FedShieldClient(fl.client.NumPyClient):
                                       weight_decay=self.weight_decay)
         criterion = nn.CrossEntropyLoss(weight=self.class_weights)
 
-        for _ in range(self.local_epochs):
-            for X_batch, y_batch in loader:
-                X_batch, y_batch = X_batch.to(DEVICE), y_batch.to(DEVICE)
-                optimizer.zero_grad()
-                loss = criterion(self.model(X_batch), y_batch)
-                if self.mu > 0:
-                    prox_term = sum((p - gp).pow(2).sum()
-                                     for p, gp in zip(self.model.parameters(), global_params))
-                    loss = loss + (self.mu / 2) * prox_term
-                loss.backward()
-                optimizer.step()
+        if self.use_dp:
+            # Opacus wraps model/optimizer/loader to do per-sample gradient
+            # clipping + calibrated noise injection (DP-SGD). A fresh
+            # PrivacyEngine each fit() call is intentional, not a shortcut:
+            # the client object itself is fresh each round anyway (Flower
+            # recreates it), so there's no hook-accumulation risk, and it
+            # keeps this round's training self-contained.
+            from opacus import PrivacyEngine
+            privacy_engine = PrivacyEngine()
+            dp_model, dp_optimizer, dp_loader = privacy_engine.make_private(
+                module=self.model, optimizer=optimizer, data_loader=loader,
+                noise_multiplier=self.noise_multiplier, max_grad_norm=self.max_grad_norm,
+            )
+            steps_this_round = 0
+            for _ in range(self.local_epochs):
+                for X_batch, y_batch in dp_loader:
+                    X_batch, y_batch = X_batch.to(DEVICE), y_batch.to(DEVICE)
+                    dp_optimizer.zero_grad()
+                    loss = criterion(dp_model(X_batch), y_batch)
+                    loss.backward()
+                    dp_optimizer.step()
+                    steps_this_round += 1
+            self.total_dp_steps += steps_this_round
+            # GradSampleModule preserves the wrapped module's parameter
+            # names/structure, so get_parameters() below works unchanged.
+        else:
+            for _ in range(self.local_epochs):
+                for X_batch, y_batch in loader:
+                    X_batch, y_batch = X_batch.to(DEVICE), y_batch.to(DEVICE)
+                    optimizer.zero_grad()
+                    loss = criterion(self.model(X_batch), y_batch)
+                    if self.mu > 0:
+                        prox_term = sum((p - gp).pow(2).sum()
+                                         for p, gp in zip(self.model.parameters(), global_params))
+                        loss = loss + (self.mu / 2) * prox_term
+                    loss.backward()
+                    optimizer.step()
 
         # Equal weighting: every client gets identical influence on the
         # global average, regardless of row count. log-weighting (tried
