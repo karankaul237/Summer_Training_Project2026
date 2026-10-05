@@ -49,19 +49,18 @@ fedshield-ids/
 ```
 
 ## Build status
-
-- [x] Step 1 — environment & repo scaffold
-- [ ] Step 2 — download & inspect datasets
-- [ ] Step 3 — feature harmonization module
-- [ ] Step 4 — non-IID partitioning
-- [ ] Step 5 — baseline FedAvg
-- [ ] Step 6 — secure aggregation
-- [ ] Step 7 — robust aggregation (Krum)
-- [ ] Step 8 — DP-SGD + epsilon tracking
-- [ ] Step 9 — client dropout simulation
-- [ ] Step 10 — membership inference attack
-- [ ] Step 11 — metrics/results logging
-- [ ] Step 12 — Streamlit dashboard
+- Step 1 — environment & repo scaffold
+- Step 2 — download & inspect datasets
+- Step 3 — feature harmonization module
+- Step 4 — non-IID partitioning
+- Step 5 — baseline FedAvg
+- Step 6 — secure aggregation
+- Step 7 — robust aggregation (Krum)
+- Step 8 — DP-SGD + epsilon tracking
+- Step 9 — client dropout simulation
+- Step 10 — membership inference attack
+- Step 11 — metrics/results logging
+- Step 12 — Streamlit dashboard
 
 ## Setup
 
