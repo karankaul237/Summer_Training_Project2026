@@ -27,31 +27,35 @@ from privacy.epsilon_accounting import compute_epsilon, steps_for_client, sample
 
 CLIENTS = ["bank", "ecommerce", "hospital", "manufacturing", "university"]
 SEED = 42
-BATCH_SIZE = 256
-LOCAL_EPOCHS = 2  # must match the uniform value FedShieldClient uses when use_dp=True
 
 
-def client_fn(cid: str, noise_multiplier: float, max_grad_norm: float):
+def client_fn(cid: str, noise_multiplier: float, max_grad_norm: float,
+              batch_size: int, local_epochs: int):
     name = CLIENTS[int(cid)]
     return FedShieldClient(name, use_dp=True, noise_multiplier=noise_multiplier,
-                            max_grad_norm=max_grad_norm).to_client()
+                            max_grad_norm=max_grad_norm, batch_size=batch_size,
+                            local_epochs=local_epochs).to_client()
 
 
-def run(num_rounds: int, noise_multiplier: float, max_grad_norm: float) -> None:
+def run(num_rounds: int, noise_multiplier: float, max_grad_norm: float,
+        batch_size: int, local_epochs: int) -> None:
     torch.manual_seed(SEED)
     initial_parameters = fl.common.ndarrays_to_parameters(get_parameters(IDSModel()))
 
-    model_save_path = f"results/dp_noise{noise_multiplier}_global_model.npz"
+    tag = f"noise{noise_multiplier}_bs{batch_size}_ep{local_epochs}_r{num_rounds}"
+    model_save_path = f"results/dp_{tag}_global_model.npz"
     Path("results").mkdir(exist_ok=True)
     history: list[dict] = []
     strategy = build_fedavg_strategy(history, initial_parameters, num_clients=len(CLIENTS),
                                       save_path=model_save_path)
 
     print(f"{'=' * 70}\nFedAvg + DP-SGD: noise_multiplier={noise_multiplier}, "
+          f"batch_size={batch_size}, local_epochs={local_epochs}, "
           f"{num_rounds} rounds\n{'=' * 70}")
 
     fl.simulation.start_simulation(
-        client_fn=lambda cid: client_fn(cid, noise_multiplier, max_grad_norm),
+        client_fn=lambda cid: client_fn(cid, noise_multiplier, max_grad_norm,
+                                         batch_size, local_epochs),
         num_clients=len(CLIENTS),
         config=fl.server.ServerConfig(num_rounds=num_rounds),
         strategy=strategy,
@@ -61,19 +65,21 @@ def run(num_rounds: int, noise_multiplier: float, max_grad_norm: float) -> None:
     for i, row in enumerate(history):
         row["round"] = i // len(CLIENTS) + 1
     df = pd.DataFrame(history)
-    out_file = Path(f"results/dp_noise{noise_multiplier}_history.csv")
+    out_file = Path(f"results/dp_{tag}_history.csv")
     df.to_csv(out_file, index=False)
 
     # Compute each client's final cumulative epsilon post-hoc (see
     # epsilon_accounting.py docstring for why this is computed this way
     # rather than read from a live accountant object).
-    print(f"\n{'=' * 70}\nFinal round results + privacy budget (noise={noise_multiplier})\n{'=' * 70}")
+    print(f"\n{'=' * 70}\nFinal round results + privacy budget "
+          f"(noise={noise_multiplier}, batch_size={batch_size}, local_epochs={local_epochs})"
+          f"\n{'=' * 70}")
     epsilon_rows = []
     for client in CLIENTS:
         train = load_client_split(client, "train")
         n = len(train)
-        steps = steps_for_client(n, BATCH_SIZE, LOCAL_EPOCHS, num_rounds)
-        rate = sample_rate_for_client(n, BATCH_SIZE)
+        steps = steps_for_client(n, batch_size, local_epochs, num_rounds)
+        rate = sample_rate_for_client(n, batch_size)
         eps = compute_epsilon(noise_multiplier, rate, steps)
 
         final_row = df[(df["round"] == num_rounds) & (df["client"] == client)]
@@ -86,7 +92,7 @@ def run(num_rounds: int, noise_multiplier: float, max_grad_norm: float) -> None:
               f"epsilon={eps:>7.2f}  accuracy={acc:.3f}  macro_f1={f1:.3f}")
 
     eps_df = pd.DataFrame(epsilon_rows)
-    eps_out = Path(f"results/dp_noise{noise_multiplier}_epsilon_summary.csv")
+    eps_out = Path(f"results/dp_{tag}_epsilon_summary.csv")
     eps_df.to_csv(eps_out, index=False)
     print(f"\nSaved: {out_file}")
     print(f"Saved: {eps_out}")
@@ -97,5 +103,12 @@ if __name__ == "__main__":
     parser.add_argument("--rounds", type=int, default=10)
     parser.add_argument("--noise-multiplier", type=float, default=1.0)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
+    # Larger batch + more local epochs than the original defaults: see
+    # the explanation above run() for why this fixes the collapse we saw
+    # with batch_size=256/local_epochs=2 -- fewer, larger-batch steps
+    # train faster AND spend privacy budget more slowly per epoch.
+    parser.add_argument("--batch-size", type=int, default=1024)
+    parser.add_argument("--local-epochs", type=int, default=5)
     args = parser.parse_args()
-    run(args.rounds, args.noise_multiplier, args.max_grad_norm)
+    run(args.rounds, args.noise_multiplier, args.max_grad_norm,
+        args.batch_size, args.local_epochs)
