@@ -1,5 +1,5 @@
 """
-Step 5, part 2: Flower client.
+Flower client (Steps 5-8).
 
 One instance of this class represents one organization (bank, hospital,
 etc.) in the federation. Flower calls fit() when this client should train
@@ -7,6 +7,11 @@ locally for a round, and evaluate() when it should report metrics on its
 own held-out data. Flower never calls anything that would expose this
 client's raw data -- only get_parameters/set_parameters (model weights)
 cross the client/server boundary.
+
+Optional behaviours, all off by default so the plain baseline is unchanged:
+    use_secagg  Step 6: mask the update before returning it
+    malicious   Step 7: simulate a compromised client (sign-flip attack)
+    use_dp      Step 8: train with DP-SGD via Opacus
 """
 
 from collections import OrderedDict
@@ -94,14 +99,14 @@ class FedShieldClient(fl.client.NumPyClient):
         return get_parameters(self.model)
 
     def fit(self, parameters, config):
-        # NumPy snapshot of the global weights, for the Step 7 attack math
-        # below (final_params is also NumPy, via get_parameters()).
+        # NumPy copy of the global weights as received -- used by the Step 7
+        # attack below (final_params is also NumPy, so the two can be mixed).
         global_params_np = [p.copy() for p in parameters]
 
         set_parameters(self.model, parameters)
-        # Separate PyTorch-tensor snapshot -- FedProx's loss term needs to
-        # do arithmetic with the LIVE, autograd-tracked model parameters,
-        # which only works against torch tensors, not NumPy arrays.
+        # Separate torch-tensor snapshot for FedProx: its loss term does
+        # arithmetic against the LIVE, autograd-tracked model parameters,
+        # which only works with tensors, not NumPy arrays.
         global_params = [p.clone().detach() for p in self.model.parameters()]
         self.model.train()
 
@@ -113,10 +118,12 @@ class FedShieldClient(fl.client.NumPyClient):
         if self.use_dp:
             # Opacus wraps model/optimizer/loader to do per-sample gradient
             # clipping + calibrated noise injection (DP-SGD). A fresh
-            # PrivacyEngine each fit() call is intentional, not a shortcut:
-            # the client object itself is fresh each round anyway (Flower
-            # recreates it), so there's no hook-accumulation risk, and it
-            # keeps this round's training self-contained.
+            # PrivacyEngine each fit() call is intentional: the client object
+            # itself is fresh each round anyway (Flower recreates it), so
+            # there's no hook-accumulation risk.
+            # NOTE: make_private() rebuilds the loader from the dataset with
+            # uniform Poisson sampling -- any custom sampler passed in is
+            # ignored, so class imbalance cannot be handled via sampling here.
             from opacus import PrivacyEngine
             privacy_engine = PrivacyEngine()
             dp_model, dp_optimizer, dp_loader = privacy_engine.make_private(
@@ -133,8 +140,8 @@ class FedShieldClient(fl.client.NumPyClient):
                     dp_optimizer.step()
                     steps_this_round += 1
             self.total_dp_steps += steps_this_round
-            # GradSampleModule preserves the wrapped module's parameter
-            # names/structure, so get_parameters() below works unchanged.
+            # dp_model wraps self.model (same underlying parameters), so the
+            # trained weights are read back from self.model below unchanged.
         else:
             for _ in range(self.local_epochs):
                 for X_batch, y_batch in loader:
@@ -149,26 +156,15 @@ class FedShieldClient(fl.client.NumPyClient):
                     optimizer.step()
 
         # Equal weighting: every client gets identical influence on the
-        # global average, regardless of row count. log-weighting (tried
-        # previously) still let Manufacturing/University dominate enough to
-        # erase Hospital's signal entirely (see diagnose_client.py history).
-        # Combined with more local epochs for small clients above, this is
-        # the strongest fairness correction we apply while keeping one
-        # shared global model (required for SecAgg/DP/MIA in later steps).
+        # global average, regardless of row count. Required for SecAgg's
+        # masks to cancel (Step 6) and for fairness to small clients (Step 5).
         fedavg_weight = 1000
         final_params = get_parameters(self.model)
 
         if self.malicious:
-            # Model-replacement / sign-flipping attack: invert and amplify
-            # the honestly-learned direction, rather than just adding noise.
-            # A noise attack is easy for Krum to catch almost by accident;
-            # this is a harder, more deliberate attack -- actively pushing
-            # the global model AWAY from what honest clients are learning,
-            # which is the realistic worst case Krum needs to defend against.
-            # global_params (captured for FedProx, above) is a list of
-            # torch Tensors; final_params is already numpy (from
-            # get_parameters) -- convert before mixing the two.
-            global_params_np = [gp.detach().cpu().numpy() for gp in global_params]
+            # Sign-flipping / model-replacement attack: invert and amplify the
+            # honestly-learned direction, actively pushing the global model
+            # AWAY from what honest clients are learning.
             delta = [fp - gp for fp, gp in zip(final_params, global_params_np)]
             final_params = [gp - self.attack_scale * d
                              for gp, d in zip(global_params_np, delta)]
