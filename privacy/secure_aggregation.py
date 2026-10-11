@@ -60,7 +60,7 @@ def _pairwise_seed(client_a: str, client_b: str, round_num: int) -> int:
 def _generate_masks(seed: int, shapes: list[tuple]) -> list[np.ndarray]:
     """Same seed -> same mask arrays, independent of who calls this."""
     rng = np.random.default_rng(seed)
-    return [rng.normal(scale=0.01, size=shape).astype(np.float32) for shape in shapes]
+    return [rng.normal(scale=100.0, size=shape).astype(np.float32) for shape in shapes]
 
 
 def mask_parameters(client_name: str, parameters: list[np.ndarray],
