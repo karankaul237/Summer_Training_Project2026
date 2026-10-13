@@ -1,0 +1,6 @@
+client,rounds_selected,rounds_total,is_attacker
+ecommerce,6,10,False
+hospital,4,10,False
+bank,0,10,False
+manufacturing,0,10,False
+university,0,10,True
