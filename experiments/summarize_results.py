@@ -6,6 +6,9 @@ Reads only files that already exist; anything missing is skipped and listed
 at the end, so one absent file never stops the rest. Writes to
 results/summary/ (new folder, so raw results stay untouched).
 
+Bulky tables (per-round learning curves, ROC curve points) are saved in full
+to their CSV, but the markdown report shows only a compact summary of them.
+
 Windows used for per-client numbers:
   - training histories: mean of the LAST 3 rounds (steadier than one round,
     since quality jumps around from round to round)
@@ -55,7 +58,7 @@ def md_table(df: pd.DataFrame, digits: int = 3) -> str:
     def cell(v):
         if isinstance(v, (float, np.floating)):
             if np.isnan(v):
-                return ""
+                return "-"  # not applicable (e.g. plain training has no noise level)
             return "inf" if np.isinf(v) else f"{v:.{digits}f}"
         return str(v)
     lines = ["| " + " | ".join(map(str, df.columns)) + " |",
@@ -67,8 +70,8 @@ def md_table(df: pd.DataFrame, digits: int = 3) -> str:
 def build_all(res: Path):
     sections, skipped = [], []
 
-    def add(stem, title, df, notes=""):
-        sections.append((stem, title, df, notes))
+    def add(stem, title, df, notes="", report_df=None):
+        sections.append((stem, title, df, notes, report_df))
 
     def need(*names):
         frames = [read(res, n) for n in names]
@@ -225,6 +228,51 @@ def build_all(res: Path):
             "vectors = number of distinct training records (0 means all of them). No setting leaked, "
             "so the DP stage never ran.")
 
+    # 10. Learning curves (per-round results of every training run) ------------
+    curve_runs = {"baseline (final)": "baseline_history.csv",
+                  "secure aggregation": "secagg_history.csv",
+                  "client dropout": "dropout_history.csv",
+                  "log weights": "baseline_history_logweighted.csv",
+                  "sample-count weights": "baseline_history_samplecount_weighted.csv",
+                  "FedAvg under attack": "krum_comparison_fedavg_attacked.csv",
+                  "Krum under attack": "krum_comparison_krum_defended.csv"}
+    frames, compact = [], []
+    for label, fname in curve_runs.items():
+        h = read(res, fname)
+        if h is None:
+            skipped.append(fname)
+            continue
+        frames.append(h[["client", "round", "accuracy", "macro_f1"]].assign(run=label))
+        row = {"run": label, "rounds": int(h["round"].max())}
+        row.update(tail_mean(h, 3)["macro_f1"].round(3).to_dict())
+        compact.append(row)
+    if frames:
+        curves = pd.concat(frames, ignore_index=True)[["run", "client", "round", "accuracy", "macro_f1"]]
+        add("10_learning_curves", "Every training run, round by round", curves,
+            "Full per-round results are in the CSV (used by the dashboard's learning curves and heatmap). "
+            "This table shows each run's mean macro-F1 over its last 3 rounds. Runs differ in length "
+            "(see rounds).", report_df=pd.DataFrame(compact))
+
+    # 11/12. ROC curves (written by experiments/roc_curves.py) ------------------
+    got = need("roc_detection.csv")
+    if got:
+        d = got[0]
+        auc = d.groupby(["model", "client"], sort=False)["auc"].first().unstack().round(3).reset_index()
+        add("11_roc_detection", "Detection ROC: attack vs benign traffic, per client (AUC shown)", d,
+            "Score = 1 - P(benign); 'attack' means any non-benign class. AUC 1.0 is perfect separation, "
+            "0.5 is chance. Measured on each client's held-out TEST split, which was never used for "
+            "tuning. The CSV holds the full curves (201 points each).", report_df=auc)
+    got = need("ecommerce_mia_roc.csv")
+    if got:
+        d = got[0]
+        auc = d.groupby("model", sort=False)["auc"].first().round(3).reset_index()
+        add("12_roc_mia", "Membership-attack ROC on the saved E-commerce models (AUC shown)", d,
+            "Same loss-threshold attack and the same clean member / non-member sets as the main attack "
+            "table. A curve on the diagonal means the attacker is guessing. Curves slightly BELOW the "
+            "diagonal are probably an artifact of how non-members were chosen (not confirmed). Only "
+            "the five saved models are drawn; the leaky and stress models were not saved.",
+            report_df=auc)
+
     return sections, skipped
 
 
@@ -241,16 +289,16 @@ def main():
     sections, skipped = build_all(res)
 
     report = ["# FedShield-IDS: results summary", ""]
-    for stem, title, df, notes in sections:
+    for stem, title, df, notes, report_df in sections:
         df.to_csv(out / f"{stem}.csv", index=False)
         report += [f"## {title}", ""]
         if notes:
             report += [f"_{notes}_", ""]
-        report += [md_table(df), ""]
+        report += [md_table(df if report_df is None else report_df), ""]
     (out / "summary_report.md").write_text("\n".join(report), encoding="utf-8")
 
     print(f"Wrote {len(sections)} tables + summary_report.md to {out}/")
-    for stem, title, df, _ in sections:
+    for stem, title, df, _, _ in sections:
         print(f"  {stem}.csv  ({len(df)} rows)  {title}")
     if skipped:
         print("\nSkipped (input file not found):")
