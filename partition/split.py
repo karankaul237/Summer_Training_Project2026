@@ -1,19 +1,10 @@
 """
 Step 4, part 1: per-client train/val/test split.
 
-Split happens BEFORE anything is fit (no scaler, no model) -- this is the
-overfitting safeguard from our design discussion. Our transforms (log1p,
-port scaling) are fixed constants, not fitted statistics, so there's no
-leakage risk there regardless, but the split still needs to happen first
-so Step 5 never accidentally trains on a row that ends up in testing.
-
-Split is stratified by label_id WITHIN each client separately (not pooled
-across clients) -- each of the 5 clients gets its own 70/15/15 split, which
-matches how federated learning actually works: each client only ever sees
-its own data.
-
-Usage:
-    python partition/split.py
+Splitting happens before model fitting. Each client's rows are split
+independently. Identical model-input feature vectors are kept in the same
+partition to prevent exact duplicate rows leaking between train/validation/
+test, even when identical features have conflicting labels.
 """
 
 from pathlib import Path
@@ -22,43 +13,79 @@ import numpy as np
 import pandas as pd
 
 SEED = 42
+_NON_FEATURE_COLUMNS = {"label_id", "label_name", "client"}
 
 
 def stratified_split(df: pd.DataFrame, label_col: str = "label_id",
                       train_frac: float = 0.70, val_frac: float = 0.15,
                       seed: int = SEED) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Split one client's data into train/val/test, preserving each class's
-    proportion in every split. A class with too few rows to split 3 ways
-    (fewer than 3 rows) goes entirely into train rather than being dropped --
-    losing a whole rare class is worse than a slightly optimistic train set.
-    """
-    rng = np.random.default_rng(seed)
-    train_parts, val_parts, test_parts = [], [], []
+    Split one client's data into train/val/test while keeping identical feature
+    vectors together. Stratification is performed over unique feature groups,
+    using each group's most frequent label as its representative label.
 
-    for _, group in df.groupby(label_col):
-        idx = group.index.to_numpy().copy()
-        rng.shuffle(idx)
-        n = len(idx)
+    A class with fewer than 3 unique feature groups is kept in train rather
+    than being dropped. If one feature vector has conflicting labels, all of
+    its rows still go to the same partition; its representative label is used
+    only to approximate stratification.
+    """
+    if df.empty:
+        empty = df.reset_index(drop=True).copy()
+        return empty.copy(), empty.copy(), empty.copy()
+    if label_col not in df.columns:
+        raise ValueError(f"label column {label_col!r} not found")
+
+    work = df.reset_index(drop=True).copy()
+    feature_cols = [
+        c for c in work.columns
+        if c not in (_NON_FEATURE_COLUMNS | {label_col})
+    ]
+    if not feature_cols:
+        raise ValueError("No feature columns available for grouping")
+
+    # ngroup assigns the same ID to rows with identical feature values,
+    # treating NaNs in the same feature positions as equal.
+    work["_split_group"] = work.groupby(
+        feature_cols, dropna=False, sort=False
+    ).ngroup()
+
+    group_labels = (
+        work.groupby("_split_group", sort=False)[label_col]
+        .agg(lambda labels: labels.mode(dropna=False).iloc[0])
+        .rename("_representative_label")
+        .reset_index()
+    )
+
+    rng = np.random.default_rng(seed)
+    train_ids, val_ids, test_ids = [], [], []
+
+    for _, label_groups in group_labels.groupby("_representative_label", dropna=False):
+        ids = label_groups["_split_group"].to_numpy().copy()
+        rng.shuffle(ids)
+        n = len(ids)
 
         if n < 3:
-            train_parts.append(group.loc[idx])
+            train_ids.extend(ids.tolist())
             continue
 
         n_train = max(1, int(n * train_frac))
         n_val = max(1, int(n * val_frac))
-        n_train = min(n_train, n - 2)  # leave at least 1 for val and 1 for test
+        n_train = min(n_train, n - 2)
+        n_val = min(n_val, n - n_train - 1)
 
-        train_parts.append(group.loc[idx[:n_train]])
-        val_parts.append(group.loc[idx[n_train:n_train + n_val]])
-        test_parts.append(group.loc[idx[n_train + n_val:]])
+        train_ids.extend(ids[:n_train].tolist())
+        val_ids.extend(ids[n_train:n_train + n_val].tolist())
+        test_ids.extend(ids[n_train + n_val:].tolist())
 
-    def _concat(parts):
-        if not parts:
-            return df.iloc[0:0]
-        return pd.concat(parts).sample(frac=1, random_state=seed).reset_index(drop=True)
+    def select(group_ids):
+        return (
+            work.loc[work["_split_group"].isin(group_ids)]
+            .drop(columns="_split_group")
+            .sample(frac=1, random_state=seed)
+            .reset_index(drop=True)
+        )
 
-    return _concat(train_parts), _concat(val_parts), _concat(test_parts)
+    return select(train_ids), select(val_ids), select(test_ids)
 
 
 def split_all_clients(combined_path: str = "data/harmonized/combined.csv",
@@ -67,7 +94,7 @@ def split_all_clients(combined_path: str = "data/harmonized/combined.csv",
     out_base = Path(out_dir)
     out_base.mkdir(parents=True, exist_ok=True)
 
-    print(f"{'=' * 60}\nPer-client stratified split (70/15/15)\n{'=' * 60}")
+    print(f"{'=' * 60}\nPer-client group-aware stratified split (70/15/15)\n{'=' * 60}")
     for client, client_df in df.groupby("client"):
         train, val, test = stratified_split(client_df)
 
@@ -79,7 +106,6 @@ def split_all_clients(combined_path: str = "data/harmonized/combined.csv",
 
         print(f"\n{client}: {len(client_df):,} total "
               f"-> train {len(train):,} / val {len(val):,} / test {len(test):,}")
-        # Sanity check: class proportions should look near-identical across splits
         for split_name, split_df in [("train", train), ("val", val), ("test", test)]:
             top_class = split_df["label_name"].value_counts(normalize=True).round(3).to_dict()
             print(f"    {split_name}: {top_class}")
