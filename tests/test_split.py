@@ -1,9 +1,12 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pandas as pd
 
 from data.schema import MODEL_INPUT_COLUMNS
 from partition.split import stratified_split
+from partition.validate_splits import audit_splits
 
 
 class StratifiedSplitTests(unittest.TestCase):
@@ -116,6 +119,42 @@ class StratifiedSplitTests(unittest.TestCase):
         self.assertFalse(feature_sets[0] & feature_sets[1])
         self.assertFalse(feature_sets[0] & feature_sets[2])
         self.assertFalse(feature_sets[1] & feature_sets[2])
+
+
+class SplitAuditTests(unittest.TestCase):
+    def _write_fixture(self, root: Path, duplicate_across_splits: bool) -> None:
+        rows = []
+        for index, label in ((0, "benign"), (0 if duplicate_across_splits else 1, "benign" if duplicate_across_splits else "attack"), (2, "attack")):
+            row = {column: float(index) for column in MODEL_INPUT_COLUMNS}
+            row.update({"label_id": 0 if label == "benign" else 1, "label_name": label, "client": "bank"})
+            rows.append(row)
+
+        combined_path = root / "combined.csv"
+        pd.DataFrame(rows).to_csv(combined_path, index=False)
+        client_dir = root / "partitioned" / "bank"
+        client_dir.mkdir(parents=True)
+
+        # Preserve each source row and its label count. In the leakage fixture,
+        # two rows with the same model inputs are deliberately split apart.
+        split_rows = {
+            "train": [rows[0]],
+            "val": [rows[1]],
+            "test": [rows[2]],
+        }
+        for name, selected in split_rows.items():
+            pd.DataFrame(selected).to_csv(client_dir / f"{name}.csv", index=False)
+
+    def test_audit_passes_clean_splits(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._write_fixture(root, duplicate_across_splits=False)
+            self.assertTrue(audit_splits(str(root / "combined.csv"), str(root / "partitioned")))
+
+    def test_audit_fails_when_features_cross_splits(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._write_fixture(root, duplicate_across_splits=True)
+            self.assertFalse(audit_splits(str(root / "combined.csv"), str(root / "partitioned")))
 
 
 if __name__ == "__main__":
