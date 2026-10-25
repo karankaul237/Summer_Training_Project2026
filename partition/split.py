@@ -87,18 +87,28 @@ def stratified_split(
     target_class_counts = fractions[:, None] * total_class_counts[None, :]
 
     # For a class represented by fewer than three distinct feature groups,
-    # reserve one (smallest possible) group for training. Do NOT force every
-    # group containing that class into training: mixed-label duplicate groups
-    # can be huge and would badly distort row proportions. If a class exists
-    # in only one group, that group necessarily cannot also appear in holdout.
+    # reserve its largest group for training. If a second group exists, reserve
+    # the smallest non-training group for test so the class is evaluated without
+    # putting identical feature vectors in multiple partitions. A class found
+    # in only one feature group cannot be represented in held-out data safely.
     group_presence = (group_class_counts > 0).sum(axis=0)
     rare_codes = group_presence[group_presence < 3].index.tolist()
     reserved_train_groups = set()
     for code in rare_codes:
         candidates = group_class_counts.index[group_class_counts[code] > 0]
         if len(candidates):
+            largest = max(candidates, key=lambda gid: (group_sizes.loc[gid], -gid))
+            reserved_train_groups.add(largest)
+
+    reserved_test_groups = set()
+    for code in rare_codes:
+        candidates = [
+            gid for gid in group_class_counts.index[group_class_counts[code] > 0]
+            if gid not in reserved_train_groups
+        ]
+        if candidates:
             smallest = min(candidates, key=lambda gid: (group_sizes.loc[gid], gid))
-            reserved_train_groups.add(smallest)
+            reserved_test_groups.add(smallest)
 
     rng = np.random.default_rng(seed)
     group_ids = group_sizes.index.to_numpy()
@@ -110,17 +120,20 @@ def stratified_split(
     current_rows = np.zeros(3, dtype=float)
     current_class_counts = np.zeros_like(target_class_counts)
 
-    # Seed training with only the minimum groups needed to represent rare
-    # classes; other groups remain eligible for validation/test.
-    for group_id in sorted(reserved_train_groups):
-        size = float(group_sizes.loc[group_id])
-        class_counts = group_class_counts.loc[group_id].to_numpy(dtype=float)
-        assigned[0].append(group_id)
-        current_rows[0] += size
-        current_class_counts[0] += class_counts
+    # Seed the rare-class constraints before assigning the remaining groups.
+    for split_index, reserved_groups in (
+        (0, reserved_train_groups), (2, reserved_test_groups)
+    ):
+        for group_id in sorted(reserved_groups):
+            size = float(group_sizes.loc[group_id])
+            class_counts = group_class_counts.loc[group_id].to_numpy(dtype=float)
+            assigned[split_index].append(group_id)
+            current_rows[split_index] += size
+            current_class_counts[split_index] += class_counts
 
+    reserved_groups = reserved_train_groups | reserved_test_groups
     for group_id in ordered_ids:
-        if group_id in reserved_train_groups:
+        if group_id in reserved_groups:
             continue
         size = float(group_sizes.loc[group_id])
         class_counts = group_class_counts.loc[group_id].to_numpy(dtype=float)
