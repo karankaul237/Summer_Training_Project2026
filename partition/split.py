@@ -16,6 +16,15 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+# Import the canonical model-input schema even when invoked as
+# `python partition/split.py` (where Python's script path is this directory).
+try:
+    from data.schema import MODEL_INPUT_COLUMNS
+except ModuleNotFoundError:
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from data.schema import MODEL_INPUT_COLUMNS
+
 SEED = 42
 _NON_FEATURE_COLUMNS = {"label_id", "label_name", "client"}
 
@@ -42,10 +51,22 @@ def stratified_split(
         raise ValueError("train_frac and val_frac must be positive and sum to less than 1")
 
     work = df.reset_index(drop=True).copy()
-    feature_cols = [
-        c for c in work.columns
-        if c not in (_NON_FEATURE_COLUMNS | {label_col})
-    ]
+    # Group by exactly the inputs the model receives, not labels or incidental
+    # metadata. This is important if combined.csv later gains extra columns.
+    schema_columns_present = [c for c in MODEL_INPUT_COLUMNS if c in work.columns]
+    if schema_columns_present:
+        missing = [c for c in MODEL_INPUT_COLUMNS if c not in work.columns]
+        if missing:
+            raise ValueError(
+                "combined data is missing model-input columns: " + ", ".join(missing)
+            )
+        feature_cols = list(MODEL_INPUT_COLUMNS)
+    else:
+        # Small synthetic frames used by unit tests need not import the full schema.
+        feature_cols = [
+            c for c in work.columns
+            if c not in (_NON_FEATURE_COLUMNS | {label_col})
+        ]
     if not feature_cols:
         raise ValueError("No feature columns available for grouping")
 
@@ -65,15 +86,19 @@ def stratified_split(
     total_class_counts = group_class_counts.sum(axis=0).to_numpy(dtype=float)
     target_class_counts = fractions[:, None] * total_class_counts[None, :]
 
-    # Keep all groups containing a class found in fewer than three groups in
-    # training; otherwise a rare class could be absent from model fitting.
+    # For a class represented by fewer than three distinct feature groups,
+    # reserve one (smallest possible) group for training. Do NOT force every
+    # group containing that class into training: mixed-label duplicate groups
+    # can be huge and would badly distort row proportions. If a class exists
+    # in only one group, that group necessarily cannot also appear in holdout.
     group_presence = (group_class_counts > 0).sum(axis=0)
-    rare_codes = set(group_presence[group_presence < 3].index.tolist())
-    rare_group_ids = set(
-        group_class_counts.index[
-            group_class_counts.reindex(columns=list(rare_codes), fill_value=0).gt(0).any(axis=1)
-        ].tolist()
-    ) if rare_codes else set()
+    rare_codes = group_presence[group_presence < 3].index.tolist()
+    reserved_train_groups = set()
+    for code in rare_codes:
+        candidates = group_class_counts.index[group_class_counts[code] > 0]
+        if len(candidates):
+            smallest = min(candidates, key=lambda gid: (group_sizes.loc[gid], gid))
+            reserved_train_groups.add(smallest)
 
     rng = np.random.default_rng(seed)
     group_ids = group_sizes.index.to_numpy()
@@ -85,23 +110,31 @@ def stratified_split(
     current_rows = np.zeros(3, dtype=float)
     current_class_counts = np.zeros_like(target_class_counts)
 
+    # Seed training with only the minimum groups needed to represent rare
+    # classes; other groups remain eligible for validation/test.
+    for group_id in sorted(reserved_train_groups):
+        size = float(group_sizes.loc[group_id])
+        class_counts = group_class_counts.loc[group_id].to_numpy(dtype=float)
+        assigned[0].append(group_id)
+        current_rows[0] += size
+        current_class_counts[0] += class_counts
+
     for group_id in ordered_ids:
+        if group_id in reserved_train_groups:
+            continue
         size = float(group_sizes.loc[group_id])
         class_counts = group_class_counts.loc[group_id].to_numpy(dtype=float)
 
-        if group_id in rare_group_ids:
-            chosen = 0
-        else:
-            row_delta = (
-                (current_rows + size - target_rows) ** 2
-                - (current_rows - target_rows) ** 2
-            ) / np.maximum(target_rows, 1.0) ** 2
-            class_delta = (
-                (current_class_counts + class_counts[None, :] - target_class_counts) ** 2
-                - (current_class_counts - target_class_counts) ** 2
-            ) / np.maximum(target_class_counts, 1.0) ** 2
-            scores = row_delta + class_delta.mean(axis=1)
-            chosen = int(np.argmin(scores))
+        row_delta = (
+            (current_rows + size - target_rows) ** 2
+            - (current_rows - target_rows) ** 2
+        ) / np.maximum(target_rows, 1.0) ** 2
+        class_delta = (
+            (current_class_counts + class_counts[None, :] - target_class_counts) ** 2
+            - (current_class_counts - target_class_counts) ** 2
+        ) / np.maximum(target_class_counts, 1.0) ** 2
+        scores = row_delta + class_delta.mean(axis=1)
+        chosen = int(np.argmin(scores))
 
         assigned[chosen].append(group_id)
         current_rows[chosen] += size
