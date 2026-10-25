@@ -47,6 +47,43 @@ class StratifiedSplitTests(unittest.TestCase):
         train, val, test = stratified_split(self.df.iloc[0:0])
         self.assertTrue(train.empty and val.empty and test.empty)
 
+    def test_row_proportions_are_balanced_when_groups_are_small(self):
+        rows = []
+        # Ninety distinct groups, with varied sizes and three well-represented
+        # classes. This checks row-aware assignment rather than equal group counts.
+        for group_id in range(90):
+            label = group_id % 3
+            for _ in range(1 + group_id % 10):
+                rows.append({
+                    "feature_a": group_id,
+                    "feature_b": group_id * 2,
+                    "label_id": label,
+                    "label_name": f"class_{label}",
+                    "client": "synthetic",
+                })
+        frame = pd.DataFrame(rows)
+        parts = stratified_split(frame)
+        expected = (0.70, 0.15, 0.15)
+        total = len(frame)
+        for part, target in zip(parts, expected):
+            self.assertLessEqual(abs(len(part) / total - target), 0.08)
+
+    def test_classes_in_fewer_than_three_groups_stay_in_training(self):
+        rows = []
+        for group_id in range(12):
+            label = 9 if group_id in (10, 11) else group_id % 2
+            rows.append({
+                "feature_a": group_id,
+                "feature_b": group_id + 100,
+                "label_id": label,
+                "label_name": f"class_{label}",
+                "client": "synthetic",
+            })
+        train, val, test = stratified_split(pd.DataFrame(rows))
+        self.assertEqual((train["label_id"] == 9).sum(), 2)
+        self.assertEqual((val["label_id"] == 9).sum(), 0)
+        self.assertEqual((test["label_id"] == 9).sum(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
