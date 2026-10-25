@@ -6,9 +6,10 @@ those rows have conflicting labels. Assignment is row-aware: large feature
 groups are placed first, then each group is assigned to the partition that
 best reduces deviations from target row counts and per-class row counts.
 
-When a class occurs in fewer than three distinct feature groups, all groups
-containing that class are kept in training so the model can learn that class.
-Large indivisible groups can still make exact 70/15/15 proportions impossible.
+For classes represented by fewer than three feature groups, one group is reserved for
+training and a second group, when available, for test. A class represented by only one feature
+group cannot appear in held-out data without leakage. Large indivisible groups can still make
+exact 70/15/15 proportions impossible.
 """
 
 from pathlib import Path
