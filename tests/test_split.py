@@ -2,6 +2,7 @@ import unittest
 
 import pandas as pd
 
+from data.schema import MODEL_INPUT_COLUMNS
 from partition.split import stratified_split
 
 
@@ -32,6 +33,34 @@ class StratifiedSplitTests(unittest.TestCase):
             if ((part["feature_a"] == 1) & (part["feature_b"] == 10)).any()
         ]
         self.assertEqual(len(locations), 1)
+
+    def test_metadata_is_not_part_of_the_model_feature_group(self):
+        rows = []
+        for source_file, label in (("source_a", 0), ("source_b", 1)):
+            row = {column: 0.0 for column in MODEL_INPUT_COLUMNS}
+            row.update({
+                "label_id": label,
+                "label_name": "benign" if label == 0 else "attack",
+                "client": "test",
+                "source_file": source_file,
+            })
+            rows.append(row)
+        second_vector = {column: 1.0 for column in MODEL_INPUT_COLUMNS}
+        second_vector.update({
+            "label_id": 0,
+            "label_name": "benign",
+            "client": "test",
+            "source_file": "source_c",
+        })
+        rows.append(second_vector)
+
+        parts = stratified_split(pd.DataFrame(rows))
+        locations = []
+        for name, part in zip(("train", "val", "test"), parts):
+            if {"source_a", "source_b"} & set(part["source_file"]):
+                locations.append((name, set(part["source_file"])))
+        self.assertEqual(len(locations), 1)
+        self.assertTrue({"source_a", "source_b"}.issubset(locations[0][1]))
 
     def test_all_rows_are_preserved(self):
         train, val, test = stratified_split(self.df)
@@ -68,7 +97,7 @@ class StratifiedSplitTests(unittest.TestCase):
         for part, target in zip(parts, expected):
             self.assertLessEqual(abs(len(part) / total - target), 0.08)
 
-    def test_classes_in_fewer_than_three_groups_stay_in_training(self):
+    def test_rare_class_gets_training_and_heldout_group_when_possible(self):
         rows = []
         for group_id in range(12):
             label = 9 if group_id in (10, 11) else group_id % 2
@@ -80,9 +109,13 @@ class StratifiedSplitTests(unittest.TestCase):
                 "client": "synthetic",
             })
         train, val, test = stratified_split(pd.DataFrame(rows))
-        self.assertEqual((train["label_id"] == 9).sum(), 2)
-        self.assertEqual((val["label_id"] == 9).sum(), 0)
-        self.assertEqual((test["label_id"] == 9).sum(), 0)
+        self.assertGreater((train["label_id"] == 9).sum(), 0)
+        self.assertGreater((val["label_id"] == 9).sum() + (test["label_id"] == 9).sum(), 0)
+        # Each unique feature vector remains wholly within one partition.
+        feature_sets = [self._feature_set(part) for part in (train, val, test)]
+        self.assertFalse(feature_sets[0] & feature_sets[1])
+        self.assertFalse(feature_sets[0] & feature_sets[2])
+        self.assertFalse(feature_sets[1] & feature_sets[2])
 
 
 if __name__ == "__main__":
