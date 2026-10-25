@@ -107,6 +107,7 @@ fedshield-ids/
 │   └── partitioned/         # per-client train/val/test
 ├── partition/
 │   ├── split.py             # duplicate-group-aware 70/15/15 split per client
+│   ├── validate_splits.py   # checks row/label preservation and cross-split feature overlap
 │   └── non_iid_metrics.py   # Jensen-Shannon divergence per client
 ├── models/mlp.py            # 18 -> 64 -> 32 -> 7 MLP (3,527 parameters)
 ├── client/                  # Flower client, data loading
@@ -184,6 +185,7 @@ Bank 586,144; E-commerce 61,065; Hospital 16,318).
 ```bash
 python data/harmonize.py                         # raw -> data/harmonized/combined.csv
 python partition/split.py                        # duplicate-group-aware per-client split
+python partition/validate_splits.py               # verify row/label preservation and no feature leakage
 python partition/non_iid_metrics.py              # heterogeneity table
 
 python experiments/run_baseline.py --rounds 15   # plain FedAvg (final baseline)
