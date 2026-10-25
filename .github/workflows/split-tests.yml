@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "partition/split.py"
+      - "partition/validate_splits.py"
       - "tests/**"
       - "data/schema.py"
       - ".github/workflows/split-tests.yml"
