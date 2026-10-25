@@ -11,7 +11,16 @@ they worked and where they did not.
 > deployment, not evidence of regulatory compliance, and the secure-aggregation component
 > is a simulation of the protocol, not a secure implementation. See [Limitations](#limitations).
 
-## Headline findings
+## Previously reported findings (pre-correction; rerun required)
+
+> **Important evaluation warning:** The metrics and conclusions in this README were produced
+> using the previous row-level split. That split allowed identical model-input feature vectors
+> to occur in both training and held-out data for some clients. The group-aware split now prevents
+> exact model-input vectors from crossing partitions, but the experiments have **not yet been
+> rerun on these corrected partitions**. Treat the results below as historical, not as validated
+> performance for the corrected split. Regenerate the partitions, rerun the experiments, and
+> regenerate `results/summary/` before reporting current model performance.
+
 
 1. **Federated training works for most clients, not all.** The final baseline (15 rounds,
    equal client weights, FedProx, extra local epochs for the two smallest clients) gives
@@ -97,7 +106,7 @@ fedshield-ids/
 │   ├── harmonized/
 │   └── partitioned/         # per-client train/val/test
 ├── partition/
-│   ├── split.py             # stratified 70/15/15 split per client
+│   ├── split.py             # duplicate-group-aware 70/15/15 split per client
 │   └── non_iid_metrics.py   # Jensen-Shannon divergence per client
 ├── models/mlp.py            # 18 -> 64 -> 32 -> 7 MLP (3,527 parameters)
 ├── client/                  # Flower client, data loading
@@ -174,7 +183,7 @@ Bank 586,144; E-commerce 61,065; Hospital 16,318).
 
 ```bash
 python data/harmonize.py                         # raw -> data/harmonized/combined.csv
-python partition/split.py                        # per-client train/val/test
+python partition/split.py                        # duplicate-group-aware per-client split
 python partition/non_iid_metrics.py              # heterogeneity table
 
 python experiments/run_baseline.py --rounds 15   # plain FedAvg (final baseline)
@@ -361,10 +370,15 @@ A real deployment would need legal review.
   reduction is lossy: Edge-IIoTset is per-packet and CSIC is HTTP text turned into counts. In
   E-commerce, 1,100 of 4,849 distinct feature vectors (22.7%, covering 67.8% of rows) appear with
   both labels, and the best possible accuracy on these features is 0.897.
-- **Held-out metrics are not fully independent for some clients.** 95.2% of E-commerce validation
-  and test rows are exact copies of training rows. Manufacturing likely has the same problem, since
-  an early check found only 157,025 distinct (feature, label) rows among 2,219,201. Treat those two
-  clients' held-out numbers, including their ROC AUCs, as optimistic.
+- **Split correction and metric freshness.** The previous row-level split placed exact duplicate
+  model-input vectors across partitions; the new group-aware split was checked and showed zero
+  shared feature hashes between train/validation/test for all five clients. Because feature groups
+  can be very large or contain conflicting labels, the resulting row proportions and class
+  proportions are not always exactly 70/15/15 or identical across splits. The metrics above are from
+  the old split and must not be treated as results for the corrected split; rerun every experiment
+  and regenerate the summaries before drawing performance conclusions. If a class occurs in only
+  one distinct feature group, leakage-free evaluation of that class is impossible: the group must
+  remain in training, so that class will be absent from held-out evaluation for that client.
 - **Single runs.** Training is seeded only for the initial weights and the data splits. Run-to-run
   variation is large (for example E-commerce ROC AUC ranged from 0.53 to 0.73 across runs).
 - **Hospital remains weak** at the default cutoff. The ROC AUC of about 0.77 suggests the cutoff and
